@@ -160,3 +160,10 @@ cython_debug/
 #.idea/
 
 *.dict
+.vscode/
+*.gif
+*.png
+eval/
+cliff_walking_eval/
+temp.md
+test.ipynb
