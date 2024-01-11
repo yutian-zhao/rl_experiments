@@ -34,14 +34,15 @@ class FeaturesExtractor(nn.Module):
         return self.linear(self.cnn(observations))
     
 class Head(nn.Module):
-    def __init__(self, input_dim, output_dim, if_prob=False):
+    def __init__(self, input_dim, output_dim, hid_dim=None, if_prob=False):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
+        self.hid_dim = hid_dim if hid_dim else self.input_dim
         self.linear = nn.Sequential(
-            nn.Linear(self.input_dim, self.input_dim),
+            nn.Linear(self.input_dim, self.hid_dim),
             nn.ReLU(),
-            nn.Linear(self.input_dim, self.output_dim),
+            nn.Linear(self.hid_dim, self.output_dim),
         )
         self.if_prob = if_prob
 

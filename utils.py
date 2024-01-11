@@ -1,9 +1,12 @@
 import math
 import random
 from collections import namedtuple, deque
+from torch.utils.data import Dataset
+import torch
+import numpy as np
 
 Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'skill', 'reward'))
+                        ('state', 'action', 'next_state', 'skill', 'reward', 'init_terminal'))
 
 class ReplayMemory(object):
 
@@ -20,7 +23,49 @@ class ReplayMemory(object):
     def __len__(self):
         return len(self.memory)
     
+def epsilon(start, end, n, num_episodes, min=0):
+    eps = start - (start-end)*n/num_episodes
+    if eps > min:
+        return eps
+    else:
+        return min
 
+class MemoryDataset(Dataset):
+    def __init__(self, capacity):
+        super().__init__()
+        self.memory = deque([], maxlen=capacity)
+
+    def add(self, data):
+        self.memory.append(data)
+
+    def __len__(self):
+        return len(self.memory)
+
+    def __getitem__(self, idx):
+        return self.memory[idx][0], self.memory[idx][1]
+    
+class EarlyStopper:
+    def __init__(self, if_save=False, patience=1, min_delta=0):
+        # if_save: whether save the best model so far
+        # patience: stop training after ```patience``` times iterations
+        # min_delta: tolerance when comparing losses
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_validation_loss = np.inf
+        self.if_save = if_save
+
+    def early_stop(self, validation_loss, state_dict=None, path=None):
+        if validation_loss < self.min_validation_loss:
+            self.min_validation_loss = validation_loss
+            self.counter = 0
+            if state_dict and self.if_save and path:
+                torch.save(state_dict, path)
+        elif validation_loss > (self.min_validation_loss + self.min_delta):
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
 
 
 # def plot_durations(show_result=False):
