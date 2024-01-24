@@ -11,7 +11,8 @@ class ClassicalAgent:
         self.step_size = step_size
         self.epsilon = epsilon
         self.discount = discount
-        self.q_table = np.random.rand(num_states, num_actions)
+        # NOTE: get rid of the need to set V(s_T)=0
+        self.q_table = np.zeros((num_states, num_actions)) # np.random.rand(num_states, num_actions)
 
     def uniform_sample(self):
         return np.random.choice(self.num_actions)
