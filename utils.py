@@ -33,10 +33,16 @@ def epsilon(start, end, n, num_episodes, min=0):
 class MemoryDataset(Dataset):
     def __init__(self, capacity):
         super().__init__()
+        self.capacity = 0
         self.memory = deque([], maxlen=capacity)
 
     def add(self, data):
+        if len(self.memory):
+            a = self.memory[0]
         self.memory.append(data)
+        b = self.memory[0]
+        if len(self.memory) == self.capacity:
+            assert a != b
 
     def __len__(self):
         return len(self.memory)
