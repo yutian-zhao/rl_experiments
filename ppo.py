@@ -61,6 +61,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import optim
 from tqdm import tqdm
 
@@ -124,6 +125,16 @@ class A2C(nn.Module):
             nn.Linear(32, 1),  # estimate V(s)
         ]
 
+        critic_target_layers = [
+            nn.Linear(n_features, 32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),  # estimate V(s)
+        ]
+
+        
+
         actor_layers = [
             nn.Linear(n_features, 32),
             nn.ReLU(),
@@ -134,22 +145,23 @@ class A2C(nn.Module):
             ),  # estimate action logits (will be fed into a softmax later)
         ]
 
-        actor_k_layers = [
-            nn.Linear(n_features, 32),
-            nn.ReLU(),
-            nn.Linear(32, 32),
-            nn.ReLU(),
-            nn.Linear(
-                32, n_actions
-            ),  # estimate action logits (will be fed into a softmax later)
-        ]
+        # actor_k_layers = [
+        #     nn.Linear(n_features, 32),
+        #     nn.ReLU(),
+        #     nn.Linear(32, 32),
+        #     nn.ReLU(),
+        #     nn.Linear(
+        #         32, n_actions
+        #     ),  # estimate action logits (will be fed into a softmax later)
+        # ]
 
         # define actor and critic networks
         self.critic = nn.Sequential(*critic_layers).to(self.device)
         self.actor = nn.Sequential(*actor_layers).to(self.device)
+        self.critic_target = nn.Sequential(*critic_target_layers).to(self.device)
         # NOTE: actor k to store actor's parameters from the last iteration
         # self.actor_k = nn.Sequential(*actor_k_layers).to(self.device)
-        # self.actor_k.load_state_dict(self.actor.state_dict())
+        self.critic_target.load_state_dict(self.critic.state_dict())
 
         # define optimizers for actor and critic
         # NOTE: from RMS to Adam, epsilon
@@ -192,9 +204,9 @@ class A2C(nn.Module):
             logits=action_logits
         )  # implicitly uses softmax
         actions = action_pd.sample()
-        action_probs = torch.pow(torch.e, action_pd.log_prob(actions)) + 1e-10
+        action_log_probs = action_pd.log_prob(actions)
         entropy = action_pd.entropy()
-        return (actions, action_probs, state_values, entropy)
+        return (actions, action_log_probs, state_values, entropy)
 
     def get_losses(
         self,
@@ -203,7 +215,7 @@ class A2C(nn.Module):
         next_states,
         # entropy: torch.Tensor,
         rewards: torch.Tensor,
-        action_k_probs: torch.Tensor,
+        action_k_log_probs: torch.Tensor,
         advantages,
         masks: torch.Tensor,
         gamma: float,
@@ -234,7 +246,11 @@ class A2C(nn.Module):
         # calculate the loss of the minibatch for actor and critic
         # critic_loss = advantages.pow(2).mean()
         # NOTE: in the original implementation, no detach
-        critic_loss = (self.critic(states)-rewards-gamma*masks*self.critic(next_states).detach()).pow(2).mean()
+        # critic_loss = (self.critic(states)-rewards-gamma*masks*self.critic(next_states).detach()).pow(2).mean()
+        with torch.no_grad():
+            target_value = rewards+gamma*masks*self.critic_target(next_states)
+        pred_value = self.critic(states)
+        critic_loss = F.mse_loss(target_value, pred_value)
 
         # give a bonus for higher entropy to encourage exploration
         # NOTE: use log probs here?
@@ -246,25 +262,34 @@ class A2C(nn.Module):
             logits=action_logits
         )  # implicitly uses softmax
         
-        action_probs = torch.pow(torch.e, action_pd.log_prob(torch.squeeze(actions))) + 1e-10
+        action_log_probs = action_pd.log_prob(torch.squeeze(actions))
+
+        # ratio between old and new policy, should be one at the first iteration
+        ratio = torch.exp(action_log_probs - action_k_log_probs)
+
+        # # clipped surrogate loss
+        policy_loss_1 = advantages * ratio
+        policy_loss_2 = advantages * torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
+        policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
+
         entropy = action_pd.entropy()
         # print(action_logits.shape, torch.squeeze(actions).shape, action_probs)
         
         
-        advantage_coef = (1+epsilon)*torch.ones_like(advantages)
-        advantage_coef[advantages<0] = 1-epsilon
-        scaled_advantages = advantages * advantage_coef
-        clipped_advantages = advantages * torch.unsqueeze(action_probs, -1)/action_k_probs
+        # advantage_coef = (1+epsilon)*torch.ones_like(advantages)
+        # advantage_coef[advantages<0] = 1-epsilon
+        # scaled_advantages = advantages * advantage_coef
+        # clipped_advantages = advantages * torch.unsqueeze(action_loprobs, -1)/action_k_probs
 
-        clipped_advantages[clipped_advantages>scaled_advantages] = scaled_advantages[clipped_advantages>scaled_advantages]
+        # clipped_advantages[clipped_advantages>scaled_advantages] = scaled_advantages[clipped_advantages>scaled_advantages]
         actor_loss = (
-            - clipped_advantages.mean() - ent_coef * entropy.mean()
+            policy_loss - ent_coef * entropy.mean()
         )
         # actor_loss.backward()
-        return (critic_loss, actor_loss)
+        return (critic_loss, actor_loss, torch.mean(torch.abs(target_value)).cpu().item(), torch.mean(torch.abs(pred_value.detach())).cpu().item())
 
     def update_parameters(
-        self, critic_loss: torch.Tensor, actor_loss: torch.Tensor
+        self, critic_loss: torch.Tensor, actor_loss: torch.Tensor, TAU=0.005
     ) -> None:
         """
         Updates the parameters of the actor and critic networks.
@@ -283,6 +308,13 @@ class A2C(nn.Module):
         self.critic_optim.step()
         torch.nn.utils.clip_grad_value_(self.critic.parameters(), 100)
         self.critic_optim.zero_grad()
+
+        critic_target_state_dict = self.critic_target.state_dict()
+        critic_state_dict = self.critic.state_dict()
+        for key in critic_state_dict:
+            critic_target_state_dict[key] = critic_state_dict[key] * \
+                TAU + critic_target_state_dict[key]*(1-TAU)
+        self.critic_target.load_state_dict(critic_target_state_dict)
 
 
 
@@ -482,7 +514,7 @@ if __name__ == "__main__":
         # ep_entropies = torch.zeros(n_steps_per_update, n_envs, device=device)
         ep_value_preds = torch.zeros(n_steps_per_update, n_envs, device=device)
         ep_rewards = torch.zeros(n_steps_per_update, n_envs, device=device)
-        ep_action_probs = torch.zeros(n_steps_per_update, n_envs, device=device)
+        ep_action_log_probs = torch.zeros(n_steps_per_update, n_envs, device=device)
         masks = torch.zeros(n_steps_per_update, n_envs, device=device)
 
         # at the start of training reset all envs to get an initial state
@@ -494,7 +526,7 @@ if __name__ == "__main__":
             # select an action A_{t} using S_{t} as input for the agent
             ep_states[step] = torch.tensor(states, device=device)
             with torch.no_grad():
-                actions, action_probs, state_value_preds, entropy = agent.select_action(
+                actions, action_log_probs, state_value_preds, entropy = agent.select_action(
                     states
                 )
 
@@ -505,7 +537,7 @@ if __name__ == "__main__":
 
             ep_value_preds[step] = torch.squeeze(state_value_preds)
             ep_rewards[step] = torch.tensor(rewards, device=device)
-            ep_action_probs[step] = action_probs
+            ep_action_log_probs[step] = action_log_probs
             # ep_entropies[step] = torch.squeeze(entropy)
             ep_actions[step] = torch.squeeze(actions)
 
@@ -532,7 +564,7 @@ if __name__ == "__main__":
         # ep_cur_value_preds = ep_value_preds[:-1].reshape((-1, 1))
         # ep_next_value_preds = ep_value_preds[1:].reshape((-1, 1))
         ep_rewards = ep_rewards[:-1].reshape((-1, 1))
-        ep_action_probs = ep_action_probs[:-1].reshape((-1, 1)).detach()
+        ep_action_log_probs = ep_action_log_probs[:-1].reshape((-1, 1)).detach()
         masks = masks[:-1].reshape((-1, 1))
         advantages = advantages[:-1].reshape((-1, 1)).detach()
         inds = np.arange(len(ep_rewards))
@@ -551,7 +583,7 @@ if __name__ == "__main__":
                     ep_next_states[batch_inds],
                     # ep_entropies[batch_inds],
                     ep_rewards[batch_inds],
-                    ep_action_probs[batch_inds],
+                    ep_action_log_probs[batch_inds],
                     masks[batch_inds],
                     advantages[batch_inds],
                     gamma,
