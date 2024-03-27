@@ -67,6 +67,8 @@ from tqdm import tqdm
 
 import gymnasium as gym
 
+import pickle
+
 
 # %%
 # Advantage Actor-Critic (A2C)
@@ -168,6 +170,8 @@ class A2C(nn.Module):
         self.critic_optim = optim.AdamW(self.critic.parameters(), lr=critic_lr)
         self.actor_optim = optim.AdamW(self.actor.parameters(), lr=actor_lr)
 
+        self.debug_once = True
+
     def forward(self, x: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass of the networks.
@@ -218,6 +222,7 @@ class A2C(nn.Module):
         action_k_log_probs: torch.Tensor,
         advantages,
         masks: torch.Tensor,
+        returns,
         gamma: float,
         ent_coef: float,
         epsilon,
@@ -241,16 +246,20 @@ class A2C(nn.Module):
             critic_loss: The critic loss for the minibatch.
             actor_loss: The actor loss for the minibatch.
         """
-        
 
         # calculate the loss of the minibatch for actor and critic
         # critic_loss = advantages.pow(2).mean()
         # NOTE: in the original implementation, no detach
         # critic_loss = (self.critic(states)-rewards-gamma*masks*self.critic(next_states).detach()).pow(2).mean()
-        with torch.no_grad():
-            target_value = rewards+gamma*masks*self.critic_target(next_states)
+        # with torch.no_grad():
+        #     critic_target_value = self.critic_target(next_states)
+        #     target_value = rewards+gamma*masks*critic_target_value
+        #     if torch.mean(torch.abs(target_value-critic_target_value)) > 1e7 and self.debug_once:
+        #         with open("debug_once.pkl", 'wb') as fout:
+        #             pickle.dump((rewards, gamma, masks, critic_target_value, next_states, target_value), fout)
+        #         self.debug_once = False
         pred_value = self.critic(states)
-        critic_loss = F.mse_loss(target_value, pred_value)
+        critic_loss = F.huber_loss(pred_value, returns)
 
         # give a bonus for higher entropy to encourage exploration
         # NOTE: use log probs here?
@@ -267,10 +276,14 @@ class A2C(nn.Module):
         # ratio between old and new policy, should be one at the first iteration
         ratio = torch.exp(action_log_probs - action_k_log_probs)
 
+        # normalize advantages
+        # advantages = (advantages-advantages.mean())/(advantages.std()+1e-05)
+
         # # clipped surrogate loss
         policy_loss_1 = advantages * ratio
         policy_loss_2 = advantages * torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
         policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
+        # when the reward is high, the prob of the action is small, the loss is large. loss=(-logp)*(return-baseline)
 
         entropy = action_pd.entropy()
         # print(action_logits.shape, torch.squeeze(actions).shape, action_probs)
@@ -286,7 +299,8 @@ class A2C(nn.Module):
             policy_loss - ent_coef * entropy.mean()
         )
         # actor_loss.backward()
-        return (critic_loss, actor_loss, torch.mean(torch.abs(target_value)).cpu().item(), torch.mean(torch.abs(pred_value.detach())).cpu().item())
+        return (critic_loss, actor_loss)
+    # torch.mean(torch.abs(target_value)).cpu().item(), torch.mean(torch.abs(pred_value.detach())).cpu().item(), torch.mean(torch.abs(critic_target_value)).cpu().item(), torch.mean(torch.abs(rewards)).cpu().item(), torch.mean(torch.abs(gamma*masks*critic_target_value)).cpu().item()
 
     def update_parameters(
         self, critic_loss: torch.Tensor, actor_loss: torch.Tensor, TAU=0.005
@@ -300,13 +314,15 @@ class A2C(nn.Module):
         """
                 
         actor_loss.backward()
+        # torch.nn.utils.clip_grad_value_(self.actor.parameters(), 10)
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
         self.actor_optim.step()
-        torch.nn.utils.clip_grad_value_(self.actor.parameters(), 100)
         self.actor_optim.zero_grad()
         
         critic_loss.backward()
+        # torch.nn.utils.clip_grad_value_(self.critic.parameters(), 10)
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
         self.critic_optim.step()
-        torch.nn.utils.clip_grad_value_(self.critic.parameters(), 100)
         self.critic_optim.zero_grad()
 
         critic_target_state_dict = self.critic_target.state_dict()
@@ -427,6 +443,7 @@ if __name__ == "__main__":
     n_steps_per_update = 128
     randomize_domain = False
     # NOTE: add bs, epochs
+    debug_once = True
     batch_size = 64
     n_epochs = 4
     epsilon = 0.2
