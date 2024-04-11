@@ -76,7 +76,7 @@ class PPO(nn.Module):
         self.critic_optim = optim.AdamW(self.critic.parameters(), lr=critic_lr)
         self.actor_optim = optim.AdamW(self.actor.parameters(), lr=actor_lr)
 
-        self.debug_once = True
+        self.debug_once = False
 
     def forward(self, x: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
         x = torch.Tensor(x).to(self.device)
@@ -120,10 +120,12 @@ class PPO(nn.Module):
         action_pd = torch.distributions.Categorical(
             logits=action_logits
         )  # implicitly uses softmax
-        action_log_probs = action_pd.log_prob(torch.squeeze(actions))
+        action_log_probs = action_pd.log_prob(torch.squeeze(actions)).unsqueeze(dim=-1)
         # ratio between old and new policy, should be one at the first iteration
         ratio = torch.exp(action_log_probs - action_k_log_probs)
         if self.debug_once:
+            print(action_k_log_probs)
+            print(action_log_probs)
             print(action_log_probs - action_k_log_probs)
             print(ratio)
             self.debug_once = False
