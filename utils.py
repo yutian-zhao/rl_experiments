@@ -5,6 +5,12 @@ from torch.utils.data import Dataset
 import torch
 import numpy as np
 
+import stable_baselines3 as sb3
+import crafter
+
+env = crafter.Env()
+model = sb3.PPO('CnnPolicy', env, verbose=1)
+
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'skill', 'reward', 'init_terminal'))
 
