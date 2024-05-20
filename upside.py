@@ -104,43 +104,46 @@ class Node:
 
 class DiscriminatorDataset(Dataset):
     def __init__(self, buffer, mapping):
-        self.data = []
+        self.data = set()
         for key, value in buffer.items():
             for v in value:
-                self.data.append((v, mapping[key]))
+                self.data.add((tuple(v), mapping[key]))
+        self.data = list(self.data)
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return self.data[idx]
+        return torch.tensor([*self.data[idx][0]]), self.data[idx][1]
 
 
-def rollout(env, policy, steps, obs=None):
+def rollout(policy, steps, obs=None):
     # return obs after n steps
     if obs is None:
-        obs = env.reset()
+        obs = policy.env.reset()
     for _ in range(steps):
         action, _states = policy.predict(obs, deterministic=False)
-        obs, reward, _, info = env.step(action)
+        obs, reward, _, info = policy.env.step(action)
         # if terminated or truncated:
         #     obs = policy.env.reset()
     return obs
 
 
-def serial_rollout(env, policies, H, T):
+def serial_rollout(policies, H, T):
     # return obs after (n+1)*steps for n policies
-    obs = env.reset()
-    for policy in policies[:-1]:
+    obs = None
+    for policy in policies:
+        policy.env.envs[0].reset(options=obs)
         obs = rollout(policy, T, obs=obs)
     return rollout(policies[-1], H, obs=obs)
 
 
-def policy_only_serial_rollout(env, policies, T):
+def policy_only_serial_rollout(policies, T):
     # return obs after (n+1)*steps for n policies
-    obs = env.reset()
+    obs = None 
     for policy in policies:
-        obs = rollout(env, policy, T, obs=obs)
+        policy.env.envs[0].reset(options=obs)
+        obs = rollout(policy, T, obs=obs)
     return obs
 
 
@@ -168,7 +171,7 @@ def sample_policy_init_state(node, T):
         node_pointer = node_pointer.parent
     # skills = skills[:-1] # remove root
     skills = skills[::-1]
-    state = policy_only_serial_rollout(node.value.env, skills, T)
+    state = policy_only_serial_rollout(skills, T)
     return state
 
 
@@ -180,11 +183,11 @@ def train_discriminator(
     )
     train_dataloader = DataLoader(train_dataset, batch_size=bs, shuffle=True)
     valid_dataloader = DataLoader(valid_dataset, batch_size=bs, shuffle=True)
-    stopper = EarlyStopper(patience=500, min_delta=-0.001, if_save=True)
+    stopper = EarlyStopper(patience=1001, min_delta=-0.001, if_save=True)
     training_losses = []
     valid_losses = []
 
-    for epoch in tqdm(range(epochs)):
+    for epoch in range(epochs):
         num_batch = 0
         train_loss_sum = 0
         discriminator.train()
@@ -194,7 +197,7 @@ def train_discriminator(
             # Compute prediction error
             pred = discriminator(X)
             # print(pred.shape, y.shape)
-            loss = torch.nn.functional.cross_entropy(pred, y, weight=weight)
+            loss = torch.nn.functional.cross_entropy(pred, y, weight=weight.to(device))
             num_batch += 1
             train_loss_sum += loss
 
@@ -230,6 +233,11 @@ def train_discriminator(
                 torch.load("upside_discrim_temp.dict")
             )
             break
+
+        if epoch%100==0:
+            print(f"train loss: {train_loss_sum / num_batch}")
+            print(f"valid loss: {valid_loss}")
+
     return valid_loss
 
 
@@ -243,17 +251,17 @@ def compute_discrim(discriminator, input, target):
 def policy_learning(state_buffer, root, nodes, discrim_threhold, H, T, device):
     # parameters
     step_limit = 100000
-    p2d_ratio = 5
+    p2d_ratio = 30
     discrim_epoch = 1000
-    iterations = 50
-    discrim_lr = 1e-2
+    iterations = 40
+    discrim_lr = 1e-4
     discrim_bs = 64
 
     num_skills = root.count() - 1
     mapping = root.get_mapping()
     print("============================\n", root.print())
     discriminator = Head(
-        input_dim=2, hid_dim=32, output_dim=num_skills, if_prob=True
+        input_dim=2, hid_dim=16, output_dim=num_skills, if_prob=True
     ).to(device)
     discrim_optimizer = optim.AdamW(
         discriminator.parameters(),
@@ -282,7 +290,7 @@ def policy_learning(state_buffer, root, nodes, discrim_threhold, H, T, device):
         min_discrim = np.inf
         min_key = np.inf
         for node in nodes:
-            node_discrim = compute_discrim(discriminator, torch.tensor(np.array(state_buffer[node.key])).float(), mapping[node.key])
+            node_discrim = compute_discrim(discriminator, torch.tensor(np.array(state_buffer[node.key])).float().to(device), mapping[node.key])
             if node_discrim < min_discrim:
                 min_discrim = node_discrim
                 min_key = node.key
@@ -290,16 +298,21 @@ def policy_learning(state_buffer, root, nodes, discrim_threhold, H, T, device):
             return True, min_key, min_discrim
         # train policy
         # TODO: initialize with warm start
-        print("Training policy") 
+        print("Training policy\n") 
         for _ in range(p2d_ratio):
             for node in nodes:
-                node.value.env.reset()
-                sample_policy_init_state(node, T)
-                node.value.learn(
-                    total_timesteps=node.value.num_timesteps + T + H
-                )  # reset_num_timesteps=True)
+                train_policy(node, T, H)
+        
     return False, min_key, min_discrim
 
+def train_policy(node, T, H):
+    # print(f"Training policy for node {node.key}"+"\n") 
+    node.value.env.reset()
+    sample_policy_init_state(node, T)
+    node.value.learn(
+        total_timesteps=T + H
+    )  # reset_num_timesteps=True) node.value.num_timesteps + 
+    # print(f"counter for node {node.key}", node.value.counter)
 
 def create_node(z_max, parent, state_buffer, H, T, device):
     env = gym.make(
@@ -321,11 +334,12 @@ def create_node(z_max, parent, state_buffer, H, T, device):
         value=DQN(
             "MlpPolicy",
             env,
-            gradient_steps=5,
+            gradient_steps=1,
             train_freq=H + T,
-            learning_starts=12,
+            learning_starts=0,
+            buffer_size=100,
             device=device,
-            learning_rate=1e-2,
+            learning_rate=1e-4,
         ),
         parent=parent,
     )
@@ -334,6 +348,15 @@ def create_node(z_max, parent, state_buffer, H, T, device):
 
 
 if __name__ == "__main__":
+
+    # H, T = 10, 10
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # root = Node(key=0, value=None, parent=None)
+    # create_node(1, root, {}, H, T, device=device)
+    # train_policy(root.children[0],H, T,)
+    # print("counter: ", root.children[0].value.env.envs[0].counter)
+    # print("dqn counter: ", root.children[0].value.counter)
+    
     # parameters
     discrim_threhold = 0.8  # (0, 1)
     n_start = 2
@@ -342,6 +365,8 @@ if __name__ == "__main__":
     num_skills = 0
     H = 2
     T = 2
+
+    # exit(0)
 
     # init
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -358,7 +383,7 @@ if __name__ == "__main__":
             # TODO: pointer and model should be updated
             # TODO: check DQN
             # TODO: add wrappers for non-termination but with truncation and reward model
-            # DQN parameters: train_freq, learning_starts, tau, batch_size, lr, gamma
+            # TODO: DQN parameters: train_freq, learning_starts, tau, batch_size, lr, gamma
             create_node(z_max, parent, state_buffer, H, T, device)
 
         success, min_key, min_discrim = policy_learning(
@@ -381,18 +406,22 @@ if __name__ == "__main__":
                 )
                 print("== ", success, min_key, min_discrim)
         else:
-            while not success and N > 1:
+            while not success and len(parent.children): # N>1
                 N -= 1
                 root.remove(min_key)
-                success, min_key, min_discrim = policy_learning(
-                    state_buffer,
-                    root,
-                    parent.children,
-                    discrim_threhold,
-                    H,
-                    T,
-                    device,
-                )
-                print("-- ", success, min_key, min_discrim)
+                state_buffer.pop(min_key)
+                if len(parent.children) > 0:
+                    success, min_key, min_discrim = policy_learning(
+                        state_buffer,
+                        root,
+                        parent.children,
+                        discrim_threhold,
+                        H,
+                        T,
+                        device,
+                    )
+                    print("-- ", success, min_key, min_discrim)
+                else:
+                    print(root.print())
         for node in parent.children:
             queue.append(node)

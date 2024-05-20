@@ -42,6 +42,8 @@ class Head(nn.Module):
         self.linear = nn.Sequential(
             nn.Linear(self.input_dim, self.hid_dim),
             nn.ReLU(),
+            nn.Linear(self.hid_dim, self.hid_dim),
+            nn.ReLU(),
             nn.Linear(self.hid_dim, self.output_dim),
         )
         self.if_prob = if_prob
