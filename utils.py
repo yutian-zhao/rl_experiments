@@ -5,12 +5,6 @@ from torch.utils.data import Dataset
 import torch
 import numpy as np
 
-import stable_baselines3 as sb3
-import crafter
-
-env = crafter.Env()
-model = sb3.PPO('CnnPolicy', env, verbose=1)
-
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'skill', 'reward', 'init_terminal'))
 
@@ -37,9 +31,9 @@ def epsilon(start, end, n, num_episodes, min=0):
         return min
 
 class MemoryDataset(Dataset):
-    def __init__(self, capacity):
+    def __init__(self, capacity=None):
         super().__init__()
-        self.capacity = 0
+        self.capacity = capacity
         self.memory = deque([], maxlen=capacity)
 
     def add(self, data):
