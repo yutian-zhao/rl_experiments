@@ -34,7 +34,7 @@ class FeaturesExtractor(nn.Module):
         return self.linear(self.cnn(observations))
     
 class Head(nn.Module):
-    def __init__(self, input_dim, output_dim, hid_dim=None, if_prob=False):
+    def __init__(self, input_dim, output_dim, hid_dim=None, if_softmax=False):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -46,7 +46,7 @@ class Head(nn.Module):
             nn.ReLU(),
             nn.Linear(self.hid_dim, self.output_dim),
         )
-        self.if_prob = if_prob
+        self.if_softmax = if_softmax
 
     def forward(self, x, extra_x=None):
         # TODO: Relu
@@ -57,7 +57,7 @@ class Head(nn.Module):
             # print("extra_x: ", extra_x.size())
             # print("post_x: ", x.size())
         x = self.linear(x)
-        if self.if_prob:
+        if self.if_softmax:
             return nn.functional.softmax(x, dim=1)
         else:
             return x

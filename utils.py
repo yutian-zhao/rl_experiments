@@ -6,7 +6,7 @@ import torch
 import numpy as np
 
 Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'skill', 'reward', 'init_terminal'))
+                        ('state', 'action', 'next_state', 'reward'))
 
 class ReplayMemory(object):
 
