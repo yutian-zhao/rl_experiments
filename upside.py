@@ -117,8 +117,8 @@ class DQN:
         total_steps,
         warm_start_steps=None,
         target_update_freq=10,
-        gamma=0.99,
-        lr=1e-4,
+        gamma=0.95,
+        lr=1e-3,
         batchsize=32,
         buffer_size=100,
         tau=None,
@@ -190,7 +190,7 @@ class DQN:
             if len(self.replay_buffer) < self.warm_start_steps:
                 return
         transitions = self.replay_buffer.sample(
-            min(len(self.replay_buffer), self.buffer_size)
+            min(len(self.replay_buffer), self.batchsize)
         )
         batch = Transition(*zip(*transitions))
 
@@ -206,12 +206,12 @@ class DQN:
         action_batch = torch.cat(batch.action)
         reward_batch = torch.cat(batch.reward)
         state_action_values = self.q_network(state_batch)[
-            torch.arange(min(len(self.replay_buffer), self.buffer_size)),
+            torch.arange(min(len(self.replay_buffer), self.batchsize)),
             action_batch.squeeze().int(),
         ]  # [B]
 
         next_state_values = torch.zeros(
-            (min(len(self.replay_buffer), self.buffer_size)), device=device
+            (min(len(self.replay_buffer), self.batchsize)), device=device
         )
         with torch.no_grad():
             next_state_values[non_final_mask] = (
@@ -260,6 +260,7 @@ class DQN:
 class DiscriminatorDataset(Dataset):
     def __init__(self, buffer, mapping):
         self.data = set()
+        self.mapping = mapping
         for key, value in buffer.items():
             for v in value:
                 self.data.add((tuple(v), mapping[key]))
@@ -301,8 +302,9 @@ def policy_only_serial_rollout(env, policies, T, eps_threshold=None):
 def sample_diffuse(env, node, T, H, num, eps_threshold=None):
     # sample num states in the diffuse part of a node
     states = []
-    for _ in range(num):
-        sample_policy_init_state(
+    for _ in range(num//H):
+        env.reset()
+        s = sample_policy_init_state(
             env, node, T, ignore_last=False, eps_threshold=eps_threshold
         )
         for _ in range(H):
@@ -314,7 +316,7 @@ def sample_diffuse(env, node, T, H, num, eps_threshold=None):
             if terminated:
                 # ignore truncated
                 state, _ = env.reset()
-        states.append(state)
+            states.append(state)
     return states
 
 
@@ -372,7 +374,7 @@ def plot_trajectories(
     plt.axis((0, size, 0, size))
     obs, _ = env.reset(options=options)
     plt.plot(obs[0], obs[1], "*", c="black")
-    plt.grid()
+    plt.grid(which='both')
 
     for eps in range(num_eval_episodes):
         for i, skill in enumerate(mapping.keys()):
@@ -390,22 +392,20 @@ def plot_trajectories(
                 if eps == 0:
                     rollouts += collect_rollout(env, s, T, eps_threshold=0)
                 else:
-                    rollouts += collect_rollout(env, s, T, eps_threshold=0.2)
+                    rollouts += collect_rollout(env, s, T, eps_threshold=0.5)
             trajectory = list(Transition(*zip(*rollouts)).state) + [
                 Transition(*zip(*rollouts)).next_state[-1]
             ]
             trajectory = np.array(list(zip(*trajectory)), dtype=np.float64)
-            for i in range(len(trajectory)):
-                visit_map[int(trajectory[0][i]), int(trajectory[1][i]), int(mapping[skill])] += 1
+            for j in range(len(trajectory[0])):
+                visit_map[int(trajectory[0][j]), int(trajectory[1][j]), int(mapping[skill])] += 1
 
             if eps == 0:
                 trajectory += np.random.uniform(-0.2, 0.2, trajectory.shape)
-                # flip upside down?
-                # print(trajectory[0])
-                # print(trajectory[1])
+                # vertical x, horizonal y
                 plt.plot(
-                    trajectory[0],
                     trajectory[1],
+                    trajectory[0],
                     "-o",
                     c=cm.gist_rainbow(mapping[skill] / len(mapping.keys())),
                     label=skill,
@@ -415,10 +415,12 @@ def plot_trajectories(
     plt.savefig(fname_prefix + f"_{datetime.now().strftime('%m%d%H%M')}.jpg")
     plt.close()
 
-    plt.figure()
+    plt.figure(figsize=(20, 16))
     for i in range(num_skills):
         plt.subplot(n_row, n_col, i + 1)
         plt.imshow(visit_map[:, :, i] + 0.01, cmap="Greens", origin='lower')
+        for (ii, j), z in np.ndenumerate(visit_map[:, :, i]):
+            plt.text(j, ii, '{}'.format(int(z)), ha='center', va='center')
     plt.savefig(
         fname_prefix + f"_visit_{datetime.now().strftime('%m%d%H%M')}.jpg"
     )
@@ -614,30 +616,35 @@ def policy_learning(
 ):
     # parameters
     step_limit = 100000
-    p2d_ratio = 16
-    discrim_epoch = 1000
-    iterations = 20
+    p2d_ratio = 1
+    discrim_epoch = 1
+    iterations = 10000
     discrim_bs = 256
-    k_policy = 8
+    k_policy = 1
 
     mapping = root.get_mapping()
+    num_skills = len(mapping.keys())
+    size = env.unwrapped.size
+    n_col = 4
+    n_row = math.ceil(num_skills / n_col)
     tqdm.write("============================\n" + root.print())
 
     # env.discriminator = discriminator
     # env.mapping = mapping
     # prepare data and mapping
     for i in tqdm(range(iterations)):
-        tqdm.write("Sampling diffuse part")
+        # tqdm.write("Sampling diffuse part")
         for n in nodes:
             env.reset()
             state_buffer[n.key] = sample_diffuse(
                 env, n, T, H, 10 * H, eps_threshold=0
             )
         dataset = DiscriminatorDataset(state_buffer, mapping)
+        
         weight = torch.ones(len(mapping.keys()))
         for node in nodes:
             weight[mapping[node.key]] = 0.25
-        tqdm.write("Training discriminator")
+        # tqdm.write("Training discriminator")
         training_losses, valid_losses = train_discriminator(
             discriminator,
             discrim_optimizer,
@@ -664,46 +671,67 @@ def policy_learning(
             return True, min_key, min_discrim
         # train policy
         # TODO: initialize with warm start
-        tqdm.write("Training policy\n")
+        tqdm.write(f"Training policy min_discrim: {min_discrim}\n")
         rewards = [[] for _ in range(len(nodes))]
+        td_error_lst = [[] for _ in range(len(nodes))]
         for _ in tqdm(range(p2d_ratio)):
             for ni, node in enumerate(nodes):
-                reward = train_policy(
+                reward, td_errors = train_policy(
                     env, discriminator, node, T, H, k_policy, mapping, device
                 )
                 rewards[ni].append(reward)
+                td_error_lst[ni] += td_errors
         # plot
-        # if i%10==9:
-        plot_lists(
-            [training_losses, valid_losses],
-            ["train", "valid"],
-            f"upside_plot/{prefix}_train_discrim_i{i}",
-        )
-        plot_lists(
-            rewards,
-            [n.key for n in nodes],
-            f"upside_plot/{prefix}_train_policy_i{i}",
-        )
-        plot_trajectories(
-            env, root, mapping, T, H, f"upside_plot/{prefix}_trac_i{i}"
-        )
-        visualize_discrim(
-            env,
-            discriminator,
-            len(mapping.keys()),
-            device,
-            f"upside_plot/{prefix}_disc_{i}",
-        )
-        visualize_discrim_subplot(
-            env,
-            discriminator,
-            len(mapping.keys()),
-            device,
-            f"upside_plot/{prefix}_disc_subplot_{i}",
-        )
-        visualize_qtable_subplot(
-            env, root, mapping, device, f"upside_plot/{prefix}_qtable_{i}"
-        )
+        if i%100==99:
+        # plot_lists(
+        #     [training_losses, valid_losses],
+        #     ["train", "valid"],
+        #     f"upside_plot/{prefix}_train_discrim_i{i}",
+        # )
+        # plot_lists(
+        #     rewards,
+        #     [n.key for n in nodes],
+        #     f"upside_plot/{prefix}_train_policy_i{i}",
+        # )
+        # plot_lists(
+        #     td_error_lst,
+        #     [n.key for n in nodes],
+        #     f"upside_plot/{prefix}_td_i{i}",
+        # )
+            plot_trajectories(
+                env, root, mapping, T, H, f"upside_plot/{prefix}_trac_i{i}"
+            )
+            visualize_discrim(
+                env,
+                discriminator,
+                len(mapping.keys()),
+                device,
+                f"upside_plot/{prefix}_disc_{i}",
+            )
+            visualize_discrim_subplot(
+                env,
+                discriminator,
+                len(mapping.keys()),
+                device,
+                f"upside_plot/{prefix}_disc_subplot_{i}",
+            )
+            visualize_qtable_subplot(
+                env, root, mapping, device, f"upside_plot/{prefix}_qtable_{i}"
+            )
+
+            diffuse_map = np.zeros((size, size, num_skills))
+            for x, y in dataset:
+                diffuse_map[x[0],x[1],y] +=  1
+            plt.figure(figsize=(20, 16))
+            for ii in range(num_skills):
+                plt.subplot(n_row, n_col, ii + 1)
+                plt.imshow(diffuse_map[:, :, ii] + 0.01, cmap="Blues", origin='lower')
+                for (ii, j), z in np.ndenumerate(diffuse_map[:, :, ii]):
+                    plt.text(j, i, '{}'.format(int(z)), ha='center', va='center')
+            plt.savefig(
+                f"upside_plot/{prefix}_diffuse_{i}_{datetime.now().strftime('%m%d%H%M')}.jpg"
+            )
+            plt.close()
     return False, min_key, min_discrim
 
 
@@ -711,10 +739,11 @@ def train_policy(env, discriminator, node, T, H, k_policy, mapping, device):
     # print(f"Training policy for node {node.key}"+"\n")
     env.reset()
     sample_policy_init_state(
-        env, node, T, ignore_last=True, eps_threshold=0.2
+        env, node, T, ignore_last=True, eps_threshold=0.5
     )  # stochasity
-    rollouts = collect_rollout(env, node, T, H, eps_threshold=0.2)
+    rollouts = collect_rollout(env, node, T, H, eps_threshold=0.5)
     sum_reward = 0
+    td_errors = []
     for rollout in rollouts[T:]:
         r = F.log_softmax(
             discriminator(
@@ -738,8 +767,9 @@ def train_policy(env, discriminator, node, T, H, k_policy, mapping, device):
         )
     node.value.steps_done += T + H
     for _ in range(k_policy):
-        node.value.update()
-    return sum_reward
+        td_error = node.value.update()
+        td_errors.append(td_error)
+    return sum_reward, td_errors
 
 
 def create_node(z_max, dqn, parent, state_buffer, T, H, device):
@@ -764,7 +794,7 @@ if __name__ == "__main__":
     # print("dqn counter: ", root.children[0].value.counter)
 
     # parameters
-    discrim_threhold = 0.8  # (0, 1)
+    discrim_threhold = 0.7  # (0, 1)
     n_start = 2
     n_end = 4
     z_max = 0
@@ -773,8 +803,9 @@ if __name__ == "__main__":
     discrim_hid = 16
     dqn_hid = 16
     total_steps = 1000
-    discrim_lr = 1e-4
-    dqn_buffer_size = 8 * T
+    discrim_lr = 1e-3
+    dqn_buffer_size = T # 8 * T
+    dqn_batchsize = 256
 
     # exit(0)
 
@@ -811,6 +842,7 @@ if __name__ == "__main__":
                 device=device,
                 total_steps=total_steps,
                 buffer_size=dqn_buffer_size,
+                batchsize=dqn_batchsize,
             )
             create_node(z_max, dqn, parent, state_buffer, T, H, device)
 
@@ -833,7 +865,7 @@ if __name__ == "__main__":
             H,
             device,
             f"{prefix}_o{loop_counter}_c0",
-        )
+        ) # 
         print(f"{success}, {min_key}, {min_discrim}")
         if success:
             while success and N < n_end:
@@ -868,8 +900,13 @@ if __name__ == "__main__":
                     H,
                     device,
                     f"{prefix}_o{loop_counter}_c1",
-                )
+                ) # 
                 print(f"== , {success}, {min_key}, {min_discrim}")
+                # TODO
+                if not success:
+                    N -= 1
+                    root.remove(min_key)
+                    state_buffer.pop(min_key)
         else:
             while not success and len(parent.children):  # N>1
                 N -= 1
@@ -897,7 +934,7 @@ if __name__ == "__main__":
                         H,
                         device,
                         f"{prefix}_o{loop_counter}_c2",
-                    )
+                    ) # 
                     tqdm.write(f"-- {success}, {min_key}, {min_discrim}")
                 else:
                     tqdm.write(root.print())
@@ -908,3 +945,11 @@ if __name__ == "__main__":
         "wb",
     ) as fout:
         pickle.dump(root, fout)
+"""
+0,|
+0:1,2,3,4,|
+1:5,6,|2:9,|3:10,12,|4:14,15,|
+5:17,|6:18,|9:x|10:23,|12:x|14:x|15:29,|
+17:x|18:x|23:x|29:36,|
+36:x|
+"""
