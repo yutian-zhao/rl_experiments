@@ -43,6 +43,7 @@ class Node:
     #     return new_key # num_skill, max_skill
 
     def get_mapping(self):
+        # key: index
         index = 0
         mapping = {}
         queue = deque([self])
@@ -371,9 +372,8 @@ def plot_trajectories(
     n_col = 4
     n_row = math.ceil(num_skills / n_col)
     plt.figure()
-    plt.axis((0, size, 0, size))
+    plt.axis((-0.5, size, -0.5, size))
     obs, _ = env.reset(options=options)
-    plt.plot(obs[0], obs[1], "*", c="black")
     plt.grid(which='both')
 
     for eps in range(num_eval_episodes):
@@ -388,11 +388,14 @@ def plot_trajectories(
                 node_pointer = node_pointer.parent
             skill_seq = skill_seq[::-1]
             rollouts = []
-            for s in skill_seq:
+            for s in skill_seq[:-1]:
                 if eps == 0:
-                    rollouts += collect_rollout(env, s, T, eps_threshold=0)
+                    rollouts += collect_rollout(env, s, T, eps_threshold=0) 
+                    
                 else:
-                    rollouts += collect_rollout(env, s, T, eps_threshold=0.5)
+                    # TODO:eps_threshold
+                    rollouts += collect_rollout(env, s, T, eps_threshold=0)
+            rollouts += collect_rollout(env, skill_seq[-1], T, H, eps_threshold=0)
             trajectory = list(Transition(*zip(*rollouts)).state) + [
                 Transition(*zip(*rollouts)).next_state[-1]
             ]
@@ -401,26 +404,41 @@ def plot_trajectories(
                 visit_map[int(trajectory[0][j]), int(trajectory[1][j]), int(mapping[skill])] += 1
 
             if eps == 0:
-                trajectory += np.random.uniform(-0.2, 0.2, trajectory.shape)
+                trajectory += np.random.uniform(-0.1, 0.1, trajectory.shape)
                 # vertical x, horizonal y
                 plt.plot(
-                    trajectory[1],
-                    trajectory[0],
-                    "-o",
+                    trajectory[1][-T-1:],
+                    trajectory[0][-T-1:],
+                    "-",
                     c=cm.gist_rainbow(mapping[skill] / len(mapping.keys())),
-                    label=skill,
+                    label=mapping[skill],
                 )
+                plt.plot(trajectory[1][-T-1],
+                    trajectory[0][-T-1],
+                    "o",
+                    c=cm.gist_rainbow(mapping[skill] / len(mapping.keys())),)
+                plt.plot(trajectory[1][-1],
+                    trajectory[0][-1],
+                    "*",
+                    c=cm.gist_rainbow(mapping[skill] / len(mapping.keys())),markersize=10)
+                plt.plot(trajectory[1][-1],
+                    trajectory[0][-1],
+                    "o",
+                    alpha=.2,
+                    c=cm.gist_rainbow(mapping[skill] / len(mapping.keys())),markersize=H*100)
 
-    # plt.legend()
+    # plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize= 'x-small')
     plt.savefig(fname_prefix + f"_{datetime.now().strftime('%m%d%H%M')}.jpg")
     plt.close()
 
     plt.figure(figsize=(20, 16))
     for i in range(num_skills):
         plt.subplot(n_row, n_col, i + 1)
-        plt.imshow(visit_map[:, :, i] + 0.01, cmap="Greens", origin='lower')
-        for (ii, j), z in np.ndenumerate(visit_map[:, :, i]):
-            plt.text(j, ii, '{}'.format(int(z)), ha='center', va='center')
+        plt.imshow(visit_map[:, :, i] + 0.01, norm='symlog', cmap="Greens", origin='lower') # , vmin=0, vmax=2*num_eval_episodes
+        plt.title(f"skill {i}")
+        # for (ii, j), z in np.ndenumerate(visit_map[:, :, i]):
+        #     plt.text(j, ii, '{}'.format(int(z)), ha='center', va='center')
+    # plt.colorbar()
     plt.savefig(
         fname_prefix + f"_visit_{datetime.now().strftime('%m%d%H%M')}.jpg"
     )
@@ -783,8 +801,25 @@ def create_node(z_max, dqn, parent, state_buffer, T, H, device):
     state_buffer[z_max] = []
 
 
+
 if __name__ == "__main__":
 
+    # with open("upside_model/upside_model_06140113.pkl", 'rb') as fin:
+    #     root = pickle.load(fin)
+    # env = gym.make(
+    #     "gym_examples/GridWorld-v0",
+    #     size=10,
+    #     render_mode="rgb_array",
+    # )
+    # env = gym_examples.UpsideWrapper(env)
+    # env = gym_examples.AgentLocation(env)
+    # fname_prefix = datetime.now().strftime("%m%d%H%M")
+    # H = 2
+    # T = 4
+    # plot_trajectories(
+    #     env, root, root.get_mapping(), T, H, fname_prefix, num_eval_episodes=100, options=None
+    # )
+    # exit(0) 
     # T, H = 10, 10
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # root = Node(key=0, value=None, parent=None)
