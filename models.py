@@ -40,12 +40,17 @@ class Head(nn.Module):
         self.output_dim = output_dim
         self.hid_dim = hid_dim if hid_dim else self.input_dim
         self.linear = nn.Sequential(
-            nn.Linear(self.input_dim, self.hid_dim),
-            nn.ReLU(),
-            nn.Linear(self.hid_dim, self.hid_dim),
-            nn.ReLU(),
-            nn.Linear(self.hid_dim, self.output_dim),
+            # nn.Linear(self.input_dim, self.hid_dim),
+            # nn.ReLU(),
+            # nn.Linear(self.hid_dim, self.hid_dim),
+            # nn.ReLU(),
+            # nn.Linear(self.hid_dim, self.output_dim),
+            nn.Linear(self.input_dim, self.output_dim),
         )
+        with torch.no_grad():
+            self.linear[0].weight *= 0.001
+            # self.linear[2].weight *= 0.001
+            # self.linear[4].weight *= 0.001
         self.if_softmax = if_softmax
 
     def forward(self, x, extra_x=None):
