@@ -167,3 +167,6 @@ eval/
 cliff_walking_eval/
 temp.md
 test.ipynb
+luna_ppo/
+ppo_weights/
+vic_eval_1/
