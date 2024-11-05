@@ -54,7 +54,7 @@ class EarlyStopper:
     def __init__(self, if_save=False, patience=1, min_delta=0):
         # if_save: whether save the best model so far
         # patience: stop training after ```patience``` times iterations
-        # min_delta: tolerance when comparing losses
+        # min_delta: tolerance when comparing losses, should be positive
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
